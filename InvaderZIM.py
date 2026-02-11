@@ -18,7 +18,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-VERSION = "3.1.0-WSL"
+VERSION = "3.2.0"
 CONFIG_FILE = os.path.expanduser("~/.zimpacker_config.txt")
 
 current_zip_path: Optional[str] = None
@@ -192,14 +192,20 @@ def rewrite_all_html_files(root_dir):
     log(f"Rewrote {count} HTML files")
 
 
-def run_zimwriterfs(site_root, output_zim, welcome_path, title, description, language):
+def run_zimwriterfs(site_root, output_zim, welcome_path, title, description, language, 
+                    compression_level=9, workers=None):
     """
     Run zimwriterfs to create ZIM file.
     Returns (success, stdout, stderr)
     
     Mandatory args: welcome, illustration, language, name, title, description, creator, publisher
+    
+    Performance options:
+    - compression_level: 0-9, lower = faster but larger files (default: 9 for max compression)
+    - workers: Number of parallel compression threads (default: CPU count)
     """
     import base64
+    import multiprocessing
     
     # Generate safe name from title
     safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', title).lower()
@@ -215,7 +221,16 @@ def run_zimwriterfs(site_root, output_zim, welcome_path, title, description, lan
     illustration_rel = "zimpacker_illustration.png"
     log(f"Created illustration: {illustration_rel}")
     
-    # ALL mandatory arguments plus skip-libmagic-check
+    # Determine optimal worker count
+    if workers is None:
+        try:
+            workers = multiprocessing.cpu_count()
+        except:
+            workers = 4
+    
+    log(f"Using compression level: {compression_level}, workers: {workers}")
+    
+    # ALL mandatory arguments plus optimization flags
     cmd = [
         "zimwriterfs",
         f"--welcome={welcome_path}",
@@ -226,6 +241,8 @@ def run_zimwriterfs(site_root, output_zim, welcome_path, title, description, lan
         f"--description={description if description else title}",
         f"--creator=zimpacker",
         f"--publisher=zimpacker",
+        f"--compressionLevel={compression_level}",  # Compression level (0-9)
+        f"--workers={workers}",  # Parallel compression threads
         "--skip-libmagic-check",  # Skip magic file requirement
         site_root,
         output_zim
@@ -258,7 +275,8 @@ def run_zimwriterfs(site_root, output_zim, welcome_path, title, description, lan
         return False, "", str(e)
 
 
-def convert_zip_to_zim(zip_path, output_zim, title, description, language, rewrite_links):
+def convert_zip_to_zim(zip_path, output_zim, title, description, language, rewrite_links,
+                       compression_level=9, workers=None):
     """Main conversion pipeline"""
     global is_converting
 
@@ -273,9 +291,13 @@ def convert_zip_to_zim(zip_path, output_zim, title, description, language, rewri
             status_queue.put(("error", "zimwriterfs not found!\n\nInstall with:\nsudo apt install zim-tools"))
             return False
 
-        # Create temp directory
-        temp_dir = tempfile.mkdtemp(prefix="zimpacker_")
-        log(f"Created temp directory: {temp_dir}")
+        # Create temp directory (use /dev/shm if available for speed)
+        if os.path.exists('/dev/shm') and os.access('/dev/shm', os.W_OK):
+            temp_dir = tempfile.mkdtemp(prefix="zimpacker_", dir="/dev/shm")
+            log(f"Using RAM disk for extraction (faster!): {temp_dir}")
+        else:
+            temp_dir = tempfile.mkdtemp(prefix="zimpacker_")
+            log(f"Created temp directory: {temp_dir}")
 
         # Extract archive
         extract_archive(zip_path, temp_dir)
@@ -297,7 +319,8 @@ def convert_zip_to_zim(zip_path, output_zim, title, description, language, rewri
         # Run zimwriterfs
         update_status("Creating ZIM file...")
         success, stdout, stderr = run_zimwriterfs(
-            site_root, output_zim, index_rel, title, description, language
+            site_root, output_zim, index_rel, title, description, language,
+            compression_level, workers
         )
 
         if not success:
@@ -341,6 +364,8 @@ class ZimPackerGUI:
         self.language_var = tk.StringVar(value="eng")
         self.description_var = tk.StringVar()
         self.rewrite_var = tk.BooleanVar(value=True)
+        self.compression_var = tk.IntVar(value=6)  # Default: balanced
+        self.workers_var = tk.IntVar(value=0)  # 0 = auto-detect
 
         self.setup_ui()
         self.start_queue_processor()
@@ -425,6 +450,46 @@ class ZimPackerGUI:
         ttk.Checkbutton(main_frame, text="Rewrite HTML links (remove file:// and absolute paths)",
                         variable=self.rewrite_var).grid(
             row=row, column=0, columnspan=3, sticky=tk.W)
+        row += 1
+
+        # Performance section
+        ttk.Label(main_frame, text="Performance:",
+                  font=("Arial", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=(15, 5))
+        row += 1
+
+        # Compression level
+        compression_frame = ttk.Frame(main_frame)
+        compression_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        
+        ttk.Label(compression_frame, text="Compression:").pack(side=tk.LEFT)
+        ttk.Radiobutton(compression_frame, text="Fast (level 3)", 
+                       variable=self.compression_var, value=3).pack(side=tk.LEFT, padx=(10, 5))
+        ttk.Radiobutton(compression_frame, text="Balanced (level 6)", 
+                       variable=self.compression_var, value=6).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(compression_frame, text="Best (level 9)", 
+                       variable=self.compression_var, value=9).pack(side=tk.LEFT, padx=5)
+        row += 1
+
+        # Workers
+        workers_frame = ttk.Frame(main_frame)
+        workers_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        
+        ttk.Label(workers_frame, text="CPU Threads:").pack(side=tk.LEFT)
+        ttk.Radiobutton(workers_frame, text="Auto", 
+                       variable=self.workers_var, value=0).pack(side=tk.LEFT, padx=(10, 5))
+        ttk.Radiobutton(workers_frame, text="2", 
+                       variable=self.workers_var, value=2).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(workers_frame, text="4", 
+                       variable=self.workers_var, value=4).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(workers_frame, text="8", 
+                       variable=self.workers_var, value=8).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(workers_frame, text="16", 
+                       variable=self.workers_var, value=16).pack(side=tk.LEFT, padx=5)
+        row += 1
+        
+        ttk.Label(main_frame, text="Tip: Lower compression = faster but larger files. More threads = faster on multi-core CPUs.",
+                  font=("Arial", 8), foreground="gray").grid(
+            row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
         row += 1
 
         # Output
@@ -567,6 +632,8 @@ class ZimPackerGUI:
         description = self.description_var.get()
         language = self.language_var.get()
         rewrite = self.rewrite_var.get()
+        compression = self.compression_var.get()
+        workers = self.workers_var.get() if self.workers_var.get() > 0 else None
 
         if not output_zim:
             self.log_message("Please specify output ZIM file!", "ERROR")
@@ -584,7 +651,8 @@ class ZimPackerGUI:
         # Start conversion thread
         conversion_thread = threading.Thread(
             target=convert_zip_to_zim,
-            args=(current_zip_path, output_zim, title, description, language, rewrite),
+            args=(current_zip_path, output_zim, title, description, language, rewrite,
+                  compression, workers),
             daemon=True
         )
         conversion_thread.start()
