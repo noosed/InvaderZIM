@@ -9,20 +9,7 @@ import os
 import sys
 import threading
 import zipfile
-import shutil
-import tempfile
-import subprocess
-import queue
-import re
-from pathlib import Path
-from typing import Optional
-
-import tkinter as tk
-from tkinter import ttk, filedialog, scrolledtext, messagebox
-import os
-import sys
-import threading
-import zipfile
+import tarfile
 import shutil
 import tempfile
 import subprocess
@@ -75,12 +62,61 @@ def verify_zimwriterfs():
         return False
 
 
-def extract_zip(zip_path, extract_dir):
-    """Extract ZIP file to directory"""
-    log(f"Extracting: {os.path.basename(zip_path)}")
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(extract_dir)
-    log(f"Extracted to: {extract_dir}")
+def extract_archive(archive_path, extract_dir):
+    """Extract archive file to directory (supports ZIP, RAR, TAR, TAR.GZ, TAR.BZ2, TAR.XZ)"""
+    log(f"Extracting: {os.path.basename(archive_path)}")
+    
+    file_lower = archive_path.lower()
+    
+    try:
+        if file_lower.endswith('.zip'):
+            with zipfile.ZipFile(archive_path, 'r') as archive_ref:
+                archive_ref.extractall(extract_dir)
+        
+        elif file_lower.endswith('.rar'):
+            # Try using unrar command-line tool
+            try:
+                result = subprocess.run(
+                    ['unrar', 'x', '-y', archive_path, extract_dir],
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                if result.returncode != 0:
+                    log(f"unrar failed, trying patool...", "WARN")
+                    raise Exception("unrar failed")
+            except (FileNotFoundError, Exception):
+                # Try using patool as fallback
+                try:
+                    import patool
+                    patool.extract_archive(archive_path, outdir=extract_dir)
+                except ImportError:
+                    raise Exception(
+                        "RAR support requires 'unrar' command or 'patool' Python package.\n"
+                        "Install with: sudo apt install unrar\n"
+                        "or: pip install patool"
+                    )
+        
+        elif file_lower.endswith(('.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz')):
+            with tarfile.open(archive_path, 'r:*') as tar_ref:
+                tar_ref.extractall(extract_dir)
+        
+        else:
+            # Try patool for other formats
+            try:
+                import patool
+                patool.extract_archive(archive_path, outdir=extract_dir)
+            except ImportError:
+                raise Exception(
+                    f"Unsupported archive format: {os.path.splitext(archive_path)[1]}\n"
+                    "Install patool for extended format support: pip install patool"
+                )
+        
+        log(f"Extracted to: {extract_dir}")
+        
+    except Exception as e:
+        log(f"Extraction failed: {e}", "ERROR")
+        raise
 
 
 def detect_site_root(extract_dir):
@@ -241,8 +277,8 @@ def convert_zip_to_zim(zip_path, output_zim, title, description, language, rewri
         temp_dir = tempfile.mkdtemp(prefix="zimpacker_")
         log(f"Created temp directory: {temp_dir}")
 
-        # Extract ZIP
-        extract_zip(zip_path, temp_dir)
+        # Extract archive
+        extract_archive(zip_path, temp_dir)
 
         # Detect site root
         site_root = detect_site_root(temp_dir)
@@ -331,7 +367,7 @@ class ZimPackerGUI:
         row += 1
 
         subtitle_label = ttk.Label(main_frame,
-                                   text="Convert website ZIPs to ZIM format",
+                                   text="Convert website archives to ZIM format",
                                    foreground="gray")
         subtitle_label.grid(row=row, column=0, columnspan=3, pady=(0, 15))
         row += 1
@@ -341,8 +377,8 @@ class ZimPackerGUI:
             row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
         row += 1
 
-        # ZIP Input
-        ttk.Label(main_frame, text="Input ZIP File:",
+        # Archive Input
+        ttk.Label(main_frame, text="Input Archive File:",
                   font=("Arial", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=5)
         row += 1
 
@@ -350,6 +386,12 @@ class ZimPackerGUI:
             row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=(0, 5))
         ttk.Button(main_frame, text="Browse", command=self.browse_zip).grid(
             row=row, column=2, sticky=tk.E)
+        row += 1
+        
+        # Supported formats info
+        ttk.Label(main_frame, text="Supports: ZIP, RAR, TAR, TAR.GZ, TAR.BZ2, TAR.XZ",
+                  font=("Arial", 8), foreground="gray").grid(
+            row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
         row += 1
 
         # Metadata section
@@ -437,10 +479,19 @@ class ZimPackerGUI:
         credit_label.grid(row=row, column=0, sticky=tk.W, pady=(5, 0))
 
     def browse_zip(self):
-        """Open file dialog to select ZIP"""
+        """Open file dialog to select archive file"""
         filepath = filedialog.askopenfilename(
-            title="Select ZIP file",
-            filetypes=[("ZIP files", "*.zip"), ("All files", "*.*")]
+            title="Select archive file",
+            filetypes=[
+                ("All supported archives", "*.zip *.rar *.tar *.tar.gz *.tgz *.tar.bz2 *.tbz2 *.tar.xz *.txz"),
+                ("ZIP files", "*.zip"),
+                ("RAR files", "*.rar"),
+                ("TAR files", "*.tar"),
+                ("TAR.GZ files", "*.tar.gz *.tgz"),
+                ("TAR.BZ2 files", "*.tar.bz2 *.tbz2"),
+                ("TAR.XZ files", "*.tar.xz *.txz"),
+                ("All files", "*.*")
+            ]
         )
 
         if filepath:
@@ -458,11 +509,19 @@ class ZimPackerGUI:
             self.output_path.set(filepath)
 
     def handle_zip_selection(self, filepath):
-        """Handle ZIP file selection"""
+        """Handle archive file selection"""
         global current_zip_path
 
-        if not filepath.lower().endswith('.zip'):
-            self.log_message("Error: File must be a ZIP archive!", "ERROR")
+        # Check if file has a supported extension
+        supported_extensions = (
+            '.zip', '.rar', '.tar', '.tar.gz', '.tgz', 
+            '.tar.bz2', '.tbz2', '.tar.xz', '.txz'
+        )
+        
+        file_lower = filepath.lower()
+        if not any(file_lower.endswith(ext) for ext in supported_extensions):
+            self.log_message("Error: File must be a supported archive format!", "ERROR")
+            self.log_message("Supported: ZIP, RAR, TAR, TAR.GZ, TAR.BZ2, TAR.XZ", "INFO")
             return
 
         if not os.path.exists(filepath):
@@ -473,7 +532,13 @@ class ZimPackerGUI:
         self.zip_path.set(filepath)
 
         # Auto-populate title from filename
-        basename = os.path.splitext(os.path.basename(filepath))[0]
+        basename = os.path.basename(filepath)
+        # Remove all known extensions
+        for ext in sorted(supported_extensions, key=len, reverse=True):
+            if basename.lower().endswith(ext):
+                basename = basename[:-len(ext)]
+                break
+        
         if not self.title_var.get():
             self.title_var.set(basename)
 
@@ -483,7 +548,7 @@ class ZimPackerGUI:
             output_path = os.path.join(output_dir, basename + ".zim")
             self.output_path.set(output_path)
 
-        self.log_message(f"Loaded ZIP: {os.path.basename(filepath)}", "OK")
+        self.log_message(f"Loaded archive: {os.path.basename(filepath)}", "OK")
 
     def start_conversion(self):
         """Start conversion in background thread"""
@@ -494,7 +559,7 @@ class ZimPackerGUI:
             return
 
         if not current_zip_path:
-            self.log_message("No ZIP file selected!", "ERROR")
+            self.log_message("No archive file selected!", "ERROR")
             return
 
         output_zim = self.output_path.get()
