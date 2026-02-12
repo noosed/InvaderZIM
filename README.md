@@ -1,7 +1,12 @@
 # InvaderZIM 👽
+
 <center><img width="811" height="734" alt="image" src="https://github.com/user-attachments/assets/9477fd36-b92b-4f82-bf52-5101d8f9626f" /></center>
 
+
+
 Convert HTML websites (stored as ZIP files) into ZIM archives for offline viewing. Perfect for archiving websites, documentation, or creating offline-readable content.
+
+
 
 ## What is this?
 
@@ -80,6 +85,8 @@ python3 InvaderZIM.py
 A window will open with a simple interface.
 
 ### 2. Select your ZIP file
+
+(FILE MUST BE IN ZIP FORMAT)
 
 Click **Browse** next to "ZIP Archive" and select your website ZIP file.
 
