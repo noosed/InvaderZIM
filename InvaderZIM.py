@@ -9,7 +9,6 @@ import os
 import sys
 import threading
 import zipfile
-import tarfile
 import shutil
 import tempfile
 import subprocess
@@ -18,7 +17,21 @@ import re
 from pathlib import Path
 from typing import Optional
 
-VERSION = "3.2.0"
+import tkinter as tk
+from tkinter import ttk, filedialog, scrolledtext, messagebox
+import os
+import sys
+import threading
+import zipfile
+import shutil
+import tempfile
+import subprocess
+import queue
+import re
+from pathlib import Path
+from typing import Optional
+
+VERSION = "3.1.0-WSL"
 CONFIG_FILE = os.path.expanduser("~/.zimpacker_config.txt")
 
 current_zip_path: Optional[str] = None
@@ -62,61 +75,12 @@ def verify_zimwriterfs():
         return False
 
 
-def extract_archive(archive_path, extract_dir):
-    """Extract archive file to directory (supports ZIP, RAR, TAR, TAR.GZ, TAR.BZ2, TAR.XZ)"""
-    log(f"Extracting: {os.path.basename(archive_path)}")
-    
-    file_lower = archive_path.lower()
-    
-    try:
-        if file_lower.endswith('.zip'):
-            with zipfile.ZipFile(archive_path, 'r') as archive_ref:
-                archive_ref.extractall(extract_dir)
-        
-        elif file_lower.endswith('.rar'):
-            # Try using unrar command-line tool
-            try:
-                result = subprocess.run(
-                    ['unrar', 'x', '-y', archive_path, extract_dir],
-                    capture_output=True,
-                    text=True,
-                    timeout=300
-                )
-                if result.returncode != 0:
-                    log(f"unrar failed, trying patool...", "WARN")
-                    raise Exception("unrar failed")
-            except (FileNotFoundError, Exception):
-                # Try using patool as fallback
-                try:
-                    import patool
-                    patool.extract_archive(archive_path, outdir=extract_dir)
-                except ImportError:
-                    raise Exception(
-                        "RAR support requires 'unrar' command or 'patool' Python package.\n"
-                        "Install with: sudo apt install unrar\n"
-                        "or: pip install patool"
-                    )
-        
-        elif file_lower.endswith(('.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz')):
-            with tarfile.open(archive_path, 'r:*') as tar_ref:
-                tar_ref.extractall(extract_dir)
-        
-        else:
-            # Try patool for other formats
-            try:
-                import patool
-                patool.extract_archive(archive_path, outdir=extract_dir)
-            except ImportError:
-                raise Exception(
-                    f"Unsupported archive format: {os.path.splitext(archive_path)[1]}\n"
-                    "Install patool for extended format support: pip install patool"
-                )
-        
-        log(f"Extracted to: {extract_dir}")
-        
-    except Exception as e:
-        log(f"Extraction failed: {e}", "ERROR")
-        raise
+def extract_zip(zip_path, extract_dir):
+    """Extract ZIP file to directory"""
+    log(f"Extracting: {os.path.basename(zip_path)}")
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_dir)
+    log(f"Extracted to: {extract_dir}")
 
 
 def detect_site_root(extract_dir):
@@ -192,20 +156,14 @@ def rewrite_all_html_files(root_dir):
     log(f"Rewrote {count} HTML files")
 
 
-def run_zimwriterfs(site_root, output_zim, welcome_path, title, description, language, 
-                    compression_level=9, workers=None):
+def run_zimwriterfs(site_root, output_zim, welcome_path, title, description, language):
     """
     Run zimwriterfs to create ZIM file.
     Returns (success, stdout, stderr)
     
     Mandatory args: welcome, illustration, language, name, title, description, creator, publisher
-    
-    Performance options:
-    - compression_level: 0-9, lower = faster but larger files (default: 9 for max compression)
-    - workers: Number of parallel compression threads (default: CPU count)
     """
     import base64
-    import multiprocessing
     
     # Generate safe name from title
     safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', title).lower()
@@ -221,16 +179,7 @@ def run_zimwriterfs(site_root, output_zim, welcome_path, title, description, lan
     illustration_rel = "zimpacker_illustration.png"
     log(f"Created illustration: {illustration_rel}")
     
-    # Determine optimal worker count
-    if workers is None:
-        try:
-            workers = multiprocessing.cpu_count()
-        except:
-            workers = 4
-    
-    log(f"Using compression level: {compression_level}, workers: {workers}")
-    
-    # ALL mandatory arguments plus optimization flags
+    # ALL mandatory arguments plus skip-libmagic-check
     cmd = [
         "zimwriterfs",
         f"--welcome={welcome_path}",
@@ -241,8 +190,6 @@ def run_zimwriterfs(site_root, output_zim, welcome_path, title, description, lan
         f"--description={description if description else title}",
         f"--creator=zimpacker",
         f"--publisher=zimpacker",
-        f"--compressionLevel={compression_level}",  # Compression level (0-9)
-        f"--workers={workers}",  # Parallel compression threads
         "--skip-libmagic-check",  # Skip magic file requirement
         site_root,
         output_zim
@@ -275,8 +222,7 @@ def run_zimwriterfs(site_root, output_zim, welcome_path, title, description, lan
         return False, "", str(e)
 
 
-def convert_zip_to_zim(zip_path, output_zim, title, description, language, rewrite_links,
-                       compression_level=9, workers=None):
+def convert_zip_to_zim(zip_path, output_zim, title, description, language, rewrite_links):
     """Main conversion pipeline"""
     global is_converting
 
@@ -291,16 +237,12 @@ def convert_zip_to_zim(zip_path, output_zim, title, description, language, rewri
             status_queue.put(("error", "zimwriterfs not found!\n\nInstall with:\nsudo apt install zim-tools"))
             return False
 
-        # Create temp directory (use /dev/shm if available for speed)
-        if os.path.exists('/dev/shm') and os.access('/dev/shm', os.W_OK):
-            temp_dir = tempfile.mkdtemp(prefix="zimpacker_", dir="/dev/shm")
-            log(f"Using RAM disk for extraction (faster!): {temp_dir}")
-        else:
-            temp_dir = tempfile.mkdtemp(prefix="zimpacker_")
-            log(f"Created temp directory: {temp_dir}")
+        # Create temp directory
+        temp_dir = tempfile.mkdtemp(prefix="zimpacker_")
+        log(f"Created temp directory: {temp_dir}")
 
-        # Extract archive
-        extract_archive(zip_path, temp_dir)
+        # Extract ZIP
+        extract_zip(zip_path, temp_dir)
 
         # Detect site root
         site_root = detect_site_root(temp_dir)
@@ -319,8 +261,7 @@ def convert_zip_to_zim(zip_path, output_zim, title, description, language, rewri
         # Run zimwriterfs
         update_status("Creating ZIM file...")
         success, stdout, stderr = run_zimwriterfs(
-            site_root, output_zim, index_rel, title, description, language,
-            compression_level, workers
+            site_root, output_zim, index_rel, title, description, language
         )
 
         if not success:
@@ -364,8 +305,6 @@ class ZimPackerGUI:
         self.language_var = tk.StringVar(value="eng")
         self.description_var = tk.StringVar()
         self.rewrite_var = tk.BooleanVar(value=True)
-        self.compression_var = tk.IntVar(value=6)  # Default: balanced
-        self.workers_var = tk.IntVar(value=0)  # 0 = auto-detect
 
         self.setup_ui()
         self.start_queue_processor()
@@ -392,7 +331,7 @@ class ZimPackerGUI:
         row += 1
 
         subtitle_label = ttk.Label(main_frame,
-                                   text="Convert website archives to ZIM format",
+                                   text="Convert website ZIPs to ZIM format",
                                    foreground="gray")
         subtitle_label.grid(row=row, column=0, columnspan=3, pady=(0, 15))
         row += 1
@@ -402,8 +341,8 @@ class ZimPackerGUI:
             row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
         row += 1
 
-        # Archive Input
-        ttk.Label(main_frame, text="Input Archive File:",
+        # ZIP Input
+        ttk.Label(main_frame, text="Input ZIP File:",
                   font=("Arial", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=5)
         row += 1
 
@@ -411,12 +350,6 @@ class ZimPackerGUI:
             row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), padx=(0, 5))
         ttk.Button(main_frame, text="Browse", command=self.browse_zip).grid(
             row=row, column=2, sticky=tk.E)
-        row += 1
-        
-        # Supported formats info
-        ttk.Label(main_frame, text="Supports: ZIP, RAR, TAR, TAR.GZ, TAR.BZ2, TAR.XZ",
-                  font=("Arial", 8), foreground="gray").grid(
-            row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
         row += 1
 
         # Metadata section
@@ -450,46 +383,6 @@ class ZimPackerGUI:
         ttk.Checkbutton(main_frame, text="Rewrite HTML links (remove file:// and absolute paths)",
                         variable=self.rewrite_var).grid(
             row=row, column=0, columnspan=3, sticky=tk.W)
-        row += 1
-
-        # Performance section
-        ttk.Label(main_frame, text="Performance:",
-                  font=("Arial", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=(15, 5))
-        row += 1
-
-        # Compression level
-        compression_frame = ttk.Frame(main_frame)
-        compression_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
-        
-        ttk.Label(compression_frame, text="Compression:").pack(side=tk.LEFT)
-        ttk.Radiobutton(compression_frame, text="Fast (level 3)", 
-                       variable=self.compression_var, value=3).pack(side=tk.LEFT, padx=(10, 5))
-        ttk.Radiobutton(compression_frame, text="Balanced (level 6)", 
-                       variable=self.compression_var, value=6).pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(compression_frame, text="Best (level 9)", 
-                       variable=self.compression_var, value=9).pack(side=tk.LEFT, padx=5)
-        row += 1
-
-        # Workers
-        workers_frame = ttk.Frame(main_frame)
-        workers_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
-        
-        ttk.Label(workers_frame, text="CPU Threads:").pack(side=tk.LEFT)
-        ttk.Radiobutton(workers_frame, text="Auto", 
-                       variable=self.workers_var, value=0).pack(side=tk.LEFT, padx=(10, 5))
-        ttk.Radiobutton(workers_frame, text="2", 
-                       variable=self.workers_var, value=2).pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(workers_frame, text="4", 
-                       variable=self.workers_var, value=4).pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(workers_frame, text="8", 
-                       variable=self.workers_var, value=8).pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(workers_frame, text="16", 
-                       variable=self.workers_var, value=16).pack(side=tk.LEFT, padx=5)
-        row += 1
-        
-        ttk.Label(main_frame, text="Tip: Lower compression = faster but larger files. More threads = faster on multi-core CPUs.",
-                  font=("Arial", 8), foreground="gray").grid(
-            row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
         row += 1
 
         # Output
@@ -544,19 +437,10 @@ class ZimPackerGUI:
         credit_label.grid(row=row, column=0, sticky=tk.W, pady=(5, 0))
 
     def browse_zip(self):
-        """Open file dialog to select archive file"""
+        """Open file dialog to select ZIP"""
         filepath = filedialog.askopenfilename(
-            title="Select archive file",
-            filetypes=[
-                ("All supported archives", "*.zip *.rar *.tar *.tar.gz *.tgz *.tar.bz2 *.tbz2 *.tar.xz *.txz"),
-                ("ZIP files", "*.zip"),
-                ("RAR files", "*.rar"),
-                ("TAR files", "*.tar"),
-                ("TAR.GZ files", "*.tar.gz *.tgz"),
-                ("TAR.BZ2 files", "*.tar.bz2 *.tbz2"),
-                ("TAR.XZ files", "*.tar.xz *.txz"),
-                ("All files", "*.*")
-            ]
+            title="Select ZIP file",
+            filetypes=[("ZIP files", "*.zip"), ("All files", "*.*")]
         )
 
         if filepath:
@@ -574,19 +458,11 @@ class ZimPackerGUI:
             self.output_path.set(filepath)
 
     def handle_zip_selection(self, filepath):
-        """Handle archive file selection"""
+        """Handle ZIP file selection"""
         global current_zip_path
 
-        # Check if file has a supported extension
-        supported_extensions = (
-            '.zip', '.rar', '.tar', '.tar.gz', '.tgz', 
-            '.tar.bz2', '.tbz2', '.tar.xz', '.txz'
-        )
-        
-        file_lower = filepath.lower()
-        if not any(file_lower.endswith(ext) for ext in supported_extensions):
-            self.log_message("Error: File must be a supported archive format!", "ERROR")
-            self.log_message("Supported: ZIP, RAR, TAR, TAR.GZ, TAR.BZ2, TAR.XZ", "INFO")
+        if not filepath.lower().endswith('.zip'):
+            self.log_message("Error: File must be a ZIP archive!", "ERROR")
             return
 
         if not os.path.exists(filepath):
@@ -597,13 +473,7 @@ class ZimPackerGUI:
         self.zip_path.set(filepath)
 
         # Auto-populate title from filename
-        basename = os.path.basename(filepath)
-        # Remove all known extensions
-        for ext in sorted(supported_extensions, key=len, reverse=True):
-            if basename.lower().endswith(ext):
-                basename = basename[:-len(ext)]
-                break
-        
+        basename = os.path.splitext(os.path.basename(filepath))[0]
         if not self.title_var.get():
             self.title_var.set(basename)
 
@@ -613,7 +483,7 @@ class ZimPackerGUI:
             output_path = os.path.join(output_dir, basename + ".zim")
             self.output_path.set(output_path)
 
-        self.log_message(f"Loaded archive: {os.path.basename(filepath)}", "OK")
+        self.log_message(f"Loaded ZIP: {os.path.basename(filepath)}", "OK")
 
     def start_conversion(self):
         """Start conversion in background thread"""
@@ -624,7 +494,7 @@ class ZimPackerGUI:
             return
 
         if not current_zip_path:
-            self.log_message("No archive file selected!", "ERROR")
+            self.log_message("No ZIP file selected!", "ERROR")
             return
 
         output_zim = self.output_path.get()
@@ -632,8 +502,6 @@ class ZimPackerGUI:
         description = self.description_var.get()
         language = self.language_var.get()
         rewrite = self.rewrite_var.get()
-        compression = self.compression_var.get()
-        workers = self.workers_var.get() if self.workers_var.get() > 0 else None
 
         if not output_zim:
             self.log_message("Please specify output ZIM file!", "ERROR")
@@ -651,8 +519,7 @@ class ZimPackerGUI:
         # Start conversion thread
         conversion_thread = threading.Thread(
             target=convert_zip_to_zim,
-            args=(current_zip_path, output_zim, title, description, language, rewrite,
-                  compression, workers),
+            args=(current_zip_path, output_zim, title, description, language, rewrite),
             daemon=True
         )
         conversion_thread.start()
