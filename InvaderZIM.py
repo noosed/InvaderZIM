@@ -31,7 +31,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-VERSION = "3.1.0-WSL"
+VERSION = "3.1.0"
 CONFIG_FILE = os.path.expanduser("~/.zimpacker_config.txt")
 
 current_zip_path: Optional[str] = None
